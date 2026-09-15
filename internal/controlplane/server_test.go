@@ -21,6 +21,7 @@ func testOptions() Options {
 		Logger:           slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Readiness:        health.CheckerFunc(func(context.Context) error { return nil }),
 		ReadinessTimeout: time.Second,
+		Nodes:            &stubNodeService{},
 	}
 }
 
@@ -29,6 +30,7 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 		"missing logger":            func(o *Options) { o.Logger = nil },
 		"missing readiness checker": func(o *Options) { o.Readiness = nil },
 		"zero readiness timeout":    func(o *Options) { o.ReadinessTimeout = 0 },
+		"missing node service":      func(o *Options) { o.Nodes = nil },
 	}
 
 	for name, mutate := range tests {

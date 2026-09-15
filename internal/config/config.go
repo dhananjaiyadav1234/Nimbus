@@ -10,6 +10,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -33,6 +34,7 @@ type Config struct {
 
 	Server   ServerConfig
 	Database DatabaseConfig
+	Cluster  ClusterConfig
 }
 
 // ServerConfig configures the control plane HTTP listener.
@@ -66,6 +68,21 @@ type DatabaseConfig struct {
 // Address returns the host:port the HTTP server should listen on.
 func (s ServerConfig) Address() string {
 	return fmt.Sprintf("%s:%d", s.Host, s.Port)
+}
+
+// ClusterConfig configures cluster-membership behaviour: how often nodes are
+// expected to heartbeat, and how many missed heartbeats before the
+// membership monitor considers a node dead. A node is marked NotReady once
+// FailureThreshold*HeartbeatInterval has elapsed since its last heartbeat —
+// see docs/cluster-membership.md for the full timeout calculation.
+type ClusterConfig struct {
+	HeartbeatInterval time.Duration
+	FailureThreshold  int
+}
+
+// Timeout is the point past which a node with no heartbeat is stale.
+func (c ClusterConfig) Timeout() time.Duration {
+	return c.HeartbeatInterval * time.Duration(c.FailureThreshold)
 }
 
 // IsDevelopment reports whether the process is running in development mode.
@@ -107,6 +124,10 @@ func Load() (*Config, error) {
 			MaxIdleConns:    l.intVal("NIMBUS_DATABASE_MAX_IDLE_CONNS", 5),
 			ConnMaxLifetime: l.duration("NIMBUS_DATABASE_CONN_MAX_LIFETIME", 30*time.Minute),
 			ConnectTimeout:  l.duration("NIMBUS_DATABASE_CONNECT_TIMEOUT", 5*time.Second),
+		},
+		Cluster: ClusterConfig{
+			HeartbeatInterval: l.duration("NIMBUS_HEARTBEAT_INTERVAL", 10*time.Second),
+			FailureThreshold:  l.intVal("NIMBUS_HEARTBEAT_FAILURE_THRESHOLD", 3),
 		},
 	}
 
@@ -161,6 +182,81 @@ func (c Config) validate() []error {
 	}
 	errs = appendIfNotPositive(errs, "NIMBUS_DATABASE_CONN_MAX_LIFETIME", c.Database.ConnMaxLifetime)
 	errs = appendIfNotPositive(errs, "NIMBUS_DATABASE_CONNECT_TIMEOUT", c.Database.ConnectTimeout)
+
+	errs = appendIfNotPositive(errs, "NIMBUS_HEARTBEAT_INTERVAL", c.Cluster.HeartbeatInterval)
+	if c.Cluster.FailureThreshold < 1 {
+		errs = append(errs, fmt.Errorf("NIMBUS_HEARTBEAT_FAILURE_THRESHOLD: must be at least 1, got %d", c.Cluster.FailureThreshold))
+	}
+
+	return errs
+}
+
+// NodeAgentConfig is the fully resolved configuration for a node-agent
+// process. It is loaded independently of Config (the Control Plane never
+// needs it, and a node agent never needs Config) but through the same
+// loader/validate pattern, so both processes fail configuration the same
+// way: every problem reported at once, in one place.
+type NodeAgentConfig struct {
+	// ControlPlaneURL is the base URL the agent registers and heartbeats
+	// against, e.g. "http://localhost:8080".
+	ControlPlaneURL string
+	// NodeDataDir holds the agent's local identity file. Two agents on the
+	// same machine must use two different directories to simulate two
+	// distinct nodes — see docs/cluster-membership.md.
+	NodeDataDir string
+	// NodeName overrides the hostname reported to the Control Plane. Empty
+	// means "use the machine's real hostname" (os.Hostname()); it exists so
+	// several agents on one development machine, which would otherwise all
+	// report the same hostname, can be told apart.
+	NodeName string
+	// HeartbeatInterval is the agent's cadence before its first successful
+	// registration. Once registered, the Control Plane's response is
+	// authoritative and the agent adopts that interval instead — see
+	// internal/nodeagent.
+	HeartbeatInterval time.Duration
+	// AgentVersion is reported to the Control Plane at registration.
+	AgentVersion string
+}
+
+// LoadNodeAgent reads node-agent configuration from the process environment.
+func LoadNodeAgent() (*NodeAgentConfig, error) {
+	var l loader
+
+	cfg := &NodeAgentConfig{
+		ControlPlaneURL:   l.str("NIMBUS_CONTROL_PLANE_URL", "http://localhost:8080"),
+		NodeDataDir:       l.str("NIMBUS_NODE_DATA_DIR", "./.nimbus"),
+		NodeName:          l.str("NIMBUS_NODE_NAME", ""),
+		HeartbeatInterval: l.duration("NIMBUS_HEARTBEAT_INTERVAL", 10*time.Second),
+		AgentVersion:      l.str("NIMBUS_AGENT_VERSION", "0.1.0"),
+	}
+
+	errs := append(l.errs, cfg.validate()...)
+	if len(errs) > 0 {
+		return nil, fmt.Errorf("invalid configuration: %w", errors.Join(errs...))
+	}
+	return cfg, nil
+}
+
+func (c NodeAgentConfig) validate() []error {
+	var errs []error
+
+	if c.ControlPlaneURL == "" {
+		errs = append(errs, errors.New("NIMBUS_CONTROL_PLANE_URL: must not be empty"))
+	} else if u, err := url.Parse(c.ControlPlaneURL); err != nil {
+		errs = append(errs, fmt.Errorf("NIMBUS_CONTROL_PLANE_URL: %q is not a valid URL: %w", c.ControlPlaneURL, err))
+	} else if u.Scheme != "http" && u.Scheme != "https" {
+		errs = append(errs, fmt.Errorf("NIMBUS_CONTROL_PLANE_URL: %q must use http or https", c.ControlPlaneURL))
+	} else if u.Host == "" {
+		errs = append(errs, fmt.Errorf("NIMBUS_CONTROL_PLANE_URL: %q is missing a host", c.ControlPlaneURL))
+	}
+
+	if c.NodeDataDir == "" {
+		errs = append(errs, errors.New("NIMBUS_NODE_DATA_DIR: must not be empty"))
+	}
+	if c.AgentVersion == "" {
+		errs = append(errs, errors.New("NIMBUS_AGENT_VERSION: must not be empty"))
+	}
+	errs = appendIfNotPositive(errs, "NIMBUS_HEARTBEAT_INTERVAL", c.HeartbeatInterval)
 
 	return errs
 }

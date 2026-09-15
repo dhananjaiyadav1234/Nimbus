@@ -37,6 +37,8 @@ type Options struct {
 	Readiness health.Checker
 	// ReadinessTimeout bounds a single readiness check.
 	ReadinessTimeout time.Duration
+	// Nodes backs every /nodes* route. Required.
+	Nodes NodeService
 }
 
 // Server is the control plane HTTP service.
@@ -59,11 +61,15 @@ func New(opts Options) (*Server, error) {
 	if opts.ReadinessTimeout <= 0 {
 		return nil, errors.New("controlplane: readiness timeout must be greater than zero")
 	}
+	if opts.Nodes == nil {
+		return nil, errors.New("controlplane: node service is required")
+	}
 
 	handler := newRouter(&api{
 		logger:           opts.Logger,
 		readiness:        opts.Readiness,
 		readinessTimeout: opts.ReadinessTimeout,
+		nodes:            opts.Nodes,
 	})
 
 	return &Server{

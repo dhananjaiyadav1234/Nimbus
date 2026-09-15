@@ -28,8 +28,10 @@ type errorResponse struct {
 }
 
 // api holds the dependencies the HTTP handlers need. It depends on
-// health.Checker rather than on a database handle, so the readiness path can be
-// exercised without a live PostgreSQL server.
+// health.Checker rather than on a database handle, so the readiness path can
+// be exercised without a live PostgreSQL server, and on the narrow
+// NodeService interface (see nodes.go) rather than *cluster.Service
+// directly, for the same reason.
 type api struct {
 	logger *slog.Logger
 	// readiness is the dependency check behind GET /ready.
@@ -37,14 +39,16 @@ type api struct {
 	// readinessTimeout bounds a single readiness check so a stalled database
 	// cannot hold the probe open indefinitely.
 	readinessTimeout time.Duration
+	// nodes is the cluster-membership service behind every /nodes* route.
+	nodes NodeService
 }
 
-// newRouter wires the Phase 1.1 endpoints.
+// newRouter wires every Phase 1.1 and Phase 1.2 endpoint.
 //
-// Routes are registered twice: once scoped to GET, and once unscoped so that a
-// wrong method produces a JSON 405 instead of the standard library's plain-text
-// response. The method-scoped pattern is the more specific of the two and wins
-// for GET requests.
+// Routes are registered twice: once scoped to a method, and once unscoped so
+// that a wrong method produces a JSON 405 instead of the standard library's
+// plain-text response. The method-scoped pattern is the more specific of the
+// two and wins whenever its method matches.
 func newRouter(a *api) http.Handler {
 	mux := http.NewServeMux()
 
@@ -53,6 +57,25 @@ func newRouter(a *api) http.Handler {
 
 	mux.HandleFunc("GET /ready", a.handleReady)
 	mux.Handle("/ready", methodNotAllowed(http.MethodGet))
+
+	mux.HandleFunc("POST /nodes/register", a.handleRegisterNode)
+	// GET /nodes/register is registered explicitly, rather than as the
+	// unscoped "/nodes/register" catch-all used elsewhere in this file,
+	// because ServeMux cannot statically order an unscoped (all-methods)
+	// literal pattern against the wildcard sibling "GET /nodes/{id}" — it
+	// panics at startup with "conflicts with" if asked to. Scoping this
+	// fallback to GET keeps it exactly as specific as that wildcard route,
+	// which resolves the ambiguity in the literal path's favour.
+	mux.Handle("GET /nodes/register", methodNotAllowed(http.MethodPost))
+
+	mux.HandleFunc("POST /nodes/{id}/heartbeat", a.handleHeartbeat)
+	mux.Handle("/nodes/{id}/heartbeat", methodNotAllowed(http.MethodPost))
+
+	mux.HandleFunc("GET /nodes/{id}", a.handleGetNode)
+	mux.Handle("/nodes/{id}", methodNotAllowed(http.MethodGet))
+
+	mux.HandleFunc("GET /nodes", a.handleListNodes)
+	mux.Handle("/nodes", methodNotAllowed(http.MethodGet))
 
 	mux.HandleFunc("/", handleNotFound)
 

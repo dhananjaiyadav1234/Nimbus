@@ -12,8 +12,10 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
+	"github.com/dhananjaiyadav1234/Nimbus/internal/cluster"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/config"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/controlplane"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/database"
@@ -64,17 +66,44 @@ func run() error {
 		slog.String("database", db.Name()),
 	)
 
+	if err := database.Migrate(ctx, db.SQL()); err != nil {
+		return errors.Join(fmt.Errorf("running database migrations: %w", err), closeDatabase(logger, db))
+	}
+	logger.Info("database migrations applied")
+
+	nodeRepo := cluster.NewPostgresRepository(db.SQL())
+	nodeService, err := cluster.NewService(nodeRepo, cfg.Cluster.HeartbeatInterval, cfg.Cluster.FailureThreshold)
+	if err != nil {
+		return errors.Join(err, closeDatabase(logger, db))
+	}
+
 	server, err := controlplane.New(controlplane.Options{
 		Config:           cfg.Server,
 		Logger:           logger,
 		Readiness:        db,
 		ReadinessTimeout: cfg.Database.ConnectTimeout,
+		Nodes:            nodeService,
 	})
 	if err != nil {
 		// Preserve both the original failure and any error closing the
 		// database, mirroring how the shutdown path below combines errors.
 		return errors.Join(err, closeDatabase(logger, db))
 	}
+
+	// The membership monitor is Nimbus's only background goroutine. It gets
+	// its own cancellation, separate from the signal-derived ctx, so it can
+	// be stopped at a precise point in the shutdown sequence (after the HTTP
+	// server has stopped accepting requests, before the database closes)
+	// rather than the instant a signal arrives.
+	monitorCtx, cancelMonitor := context.WithCancel(context.Background())
+	monitor := cluster.NewMonitor(nodeService, logger)
+	var monitorDone sync.WaitGroup
+	monitorDone.Add(1)
+	go func() {
+		defer monitorDone.Done()
+		monitor.Run(monitorCtx)
+	}()
+	logger.Info("membership monitor started", slog.Duration("interval", cfg.Cluster.HeartbeatInterval))
 
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- server.ListenAndServe() }()
@@ -97,6 +126,10 @@ func run() error {
 	if err := server.Shutdown(context.Background()); err != nil {
 		runErr = errors.Join(runErr, err)
 	}
+
+	cancelMonitor()
+	monitorDone.Wait()
+	logger.Info("membership monitor stopped")
 
 	if err := closeDatabase(logger, db); err != nil {
 		runErr = errors.Join(runErr, err)

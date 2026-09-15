@@ -8,37 +8,55 @@ on a large existing orchestrator.
 Nimbus is conceptually similar to modern container orchestration systems, but
 it is not, and does not aim to be, a Kubernetes reimplementation.
 
-## Current status: Phase 1.1 — Project Foundation
+## Current status: Phase 1.2 — Node Registration & Cluster Membership
 
-The current implementation provides a clean, production-quality development
-foundation and nothing more:
+**Implemented**
 
-- A modular Go codebase (`cmd/`, `internal/...`)
-- A runnable **Nimbus Control Plane** HTTP service
-- PostgreSQL running locally via Docker Compose, with connectivity verified
-  at startup
-- Centralized, environment-variable-based configuration
-- Structured logging (`log/slog`)
-- Graceful shutdown on `SIGINT`/`SIGTERM`
-- `GET /health` — liveness probe
-- `GET /ready` — readiness probe (checks database connectivity)
-- Unit tests for configuration, the HTTP handlers, and the server lifecycle
+- Foundation *(Phase 1.1)*: modular Go codebase, a runnable **Nimbus Control
+  Plane** HTTP service, PostgreSQL via Docker Compose, centralized
+  environment-variable configuration, structured logging (`log/slog`),
+  graceful `SIGINT`/`SIGTERM` shutdown, `GET /health` / `GET /ready`.
+- ✓ **Node registration** — a **Node Agent** (`cmd/node-agent`) discovers its
+  machine and registers with the Control Plane; registration is idempotent
+  by a stable, agent-persisted node ID (never a hostname).
+- ✓ **Node heartbeats** — agents heartbeat on a Control-Plane-assigned
+  interval; the Control Plane records its own receipt time, immune to clock
+  skew between machines.
+- ✓ **Cluster membership** — every node's identity, status, and capacity is
+  persisted in PostgreSQL (`internal/cluster`), the sole source of truth; a
+  Control Plane restart never loses it.
+- ✓ **Node failure detection** — a background monitor marks a node
+  `NotReady` after a configurable number of missed heartbeat intervals.
+- ✓ **Node recovery** — a `NotReady` node's next successful heartbeat moves
+  it straight back to `Ready`.
+- ✓ **Basic node CLI** — `nimbus node list` (`cmd/nimbus`), reading from the
+  Control Plane's API only.
 
-No cluster, scheduling, workload execution, node agents, self-healing,
-service discovery, load balancing, or authentication exist yet — those are
-future-phase work. See [`docs/architecture.md`](docs/architecture.md) for a
-precise current-vs-planned breakdown.
+**Coming next**
+
+- Deployment scheduling and container lifecycle management (Phase 2)
+- Desired-state reconciliation and self-healing (Phase 3)
+- Service discovery, load balancing, observability (Phase 4)
+- Scaling and advanced deployment strategies (Phase 5)
+
+See [`docs/architecture.md`](docs/architecture.md) for a precise
+current-vs-planned breakdown and [`docs/cluster-membership.md`](docs/cluster-membership.md)
+for exactly how registration, heartbeats, and failure detection work.
 
 ### Architecture (current)
 
 ```
-Developer
-   |
-   v
-Nimbus Control Plane
-   |
-   v
-PostgreSQL
+                 Developer / nimbus CLI
+                          │
+                          ▼
+                Nimbus Control Plane
+                          │
+              ┌───────────┼───────────┐
+              ▼           │           ▼
+        Node Agent A      │      Node Agent B  ...
+                          │
+                          ▼
+                     PostgreSQL
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for component-level detail
@@ -47,16 +65,16 @@ and how future phases are expected to extend this.
 ### Getting started
 
 See [`docs/development.md`](docs/development.md) for exact, copy-pasteable
-commands to clone the repo, start PostgreSQL, configure environment
-variables, run the control plane, exercise `/health` and `/ready`, and run
-the test suite. Everything runs locally — no cloud account, API key, or paid
-service is required.
+commands to clone the repo, start PostgreSQL, run the Control Plane, run
+several Node Agents to simulate a small cluster, watch a node fail and
+recover, use the `nimbus` CLI, and run the test suite. Everything runs
+locally — no cloud account, API key, or paid service is required.
 
 ## Roadmap
 
 | Phase | Focus |
 |---|---|
-| **Phase 1 — Foundation & Cluster** | Project foundation *(this repo is at 1.1)*, then cluster and node management |
+| **Phase 1 — Foundation & Cluster** | Project foundation *(1.1, done)*, cluster and node management *(1.2, done — this repo is here)* |
 | Phase 2 — Workload Deployment & Scheduling | Container deployment, resource-aware scheduling |
 | Phase 3 — Self-Healing & Reliability | Desired-state reconciliation, self-healing |
 | Phase 4 — Networking & Observability | Service discovery, load balancing, observability |

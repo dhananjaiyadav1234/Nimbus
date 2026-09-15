@@ -99,24 +99,128 @@ or driver internals are exposed. Restart the database afterwards:
 docker compose -f deployments/docker-compose.yml start
 ```
 
-## 8. Stop the control plane
+## 8. Run three Node Agents and watch the cluster
 
-Press `Ctrl+C` in the terminal running `go run ./cmd/control-plane`. It
-handles `SIGINT`/`SIGTERM`, stops accepting new requests, finishes any
-in-flight ones, closes the database connection, and logs each step before
-exiting.
+With the control plane still running from step 5, open three more terminals
+(or background them — commands below do that for you) and start three
+agents, each with its own local identity directory and a distinct simulated
+hostname:
 
-## 9. Run automated tests
+```bash
+NIMBUS_NODE_DATA_DIR=/tmp/nimbus-node-a NIMBUS_NODE_NAME=node-a \
+  go run ./cmd/node-agent &
+
+NIMBUS_NODE_DATA_DIR=/tmp/nimbus-node-b NIMBUS_NODE_NAME=node-b \
+  go run ./cmd/node-agent &
+
+NIMBUS_NODE_DATA_DIR=/tmp/nimbus-node-c NIMBUS_NODE_NAME=node-c \
+  go run ./cmd/node-agent &
+```
+
+Each prints `"node agent started"` then `"node agent registered"`. Confirm
+all three registered as distinct nodes:
+
+```bash
+curl -s http://localhost:8080/nodes
+```
+
+(pipe through `jq` if you have it, or just use `go run ./cmd/nimbus node
+list` from step 9 for a readable table). You should see three
+entries — `node-a`, `node-b`, `node-c` — all `"Ready"`.
+
+**Failure detection.** Stop one agent (`kill %2` for node-b if it was the
+second background job, or `Ctrl+C` in its terminal). Wait at least
+`NIMBUS_HEARTBEAT_INTERVAL × NIMBUS_HEARTBEAT_FAILURE_THRESHOLD` (30 seconds
+with the defaults), then check again:
+
+```bash
+sleep 30
+go run ./cmd/nimbus node list
+```
+
+`node-b` should now show `NotReady`; `node-a` and `node-c` remain `Ready`.
+The control plane's own logs show exactly one `"node marked NotReady"` line
+for `node-b` — nothing for the two healthy nodes.
+
+**Recovery.** Restart the stopped agent with the *same* data directory:
+
+```bash
+NIMBUS_NODE_DATA_DIR=/tmp/nimbus-node-b NIMBUS_NODE_NAME=node-b \
+  go run ./cmd/node-agent &
+```
+
+Its next heartbeat (within one `NIMBUS_HEARTBEAT_INTERVAL`) flips it back to
+`Ready` — check with `nimbus node list` again. Note it re-used its existing
+node ID (from `/tmp/nimbus-node-b/identity.json`) rather than registering as
+a fourth node.
+
+See [`docs/cluster-membership.md`](cluster-membership.md) for exactly how
+registration, heartbeats, and failure detection work.
+
+## 9. Use the CLI
+
+```bash
+go run ./cmd/nimbus node list
+```
+
+```
+NAME       STATUS     CPU     MEMORY     LAST HEARTBEAT
+node-a     Ready      8       16 GiB     2s ago
+node-b     Ready      8       16 GiB     4s ago
+node-c     Ready      8       16 GiB     1s ago
+```
+
+`--control-plane <url>` or `NIMBUS_CONTROL_PLANE_URL` points it at a
+non-default Control Plane. With the control plane stopped, it prints
+`error: unable to connect to Nimbus control plane` and exits non-zero,
+rather than a raw connection error.
+
+## 10. Stop everything
+
+Stop the agents (`kill %1 %2 %3`, or `Ctrl+C` in each terminal), then the
+control plane (`Ctrl+C` in its terminal). The control plane's shutdown log
+now includes the membership monitor:
+
+```
+time=... level=INFO msg="shutdown signal received"
+time=... level=INFO msg="http server shutting down" timeout=15s
+time=... level=INFO msg="http server stopped"
+time=... level=INFO msg="membership monitor stopped"
+time=... level=INFO msg="closing database connection" address=localhost:5432
+time=... level=INFO msg="database connection closed"
+time=... level=INFO msg="nimbus control plane stopped"
+```
+
+Each agent, on `Ctrl+C`, logs its own shutdown and exits with no goroutines
+left running — no deregistration call is made (see
+[`docs/cluster-membership.md`](cluster-membership.md#graceful-shutdown)); a
+stopped agent's node simply becomes `NotReady` once its heartbeat is missed.
+
+## 11. Run automated tests
 
 ```bash
 go test ./...
 ```
 
-These are unit tests and do not require PostgreSQL to be running — the
-readiness dependency is a mockable interface (see
-[`internal/health/health.go`](../internal/health/health.go)).
+Most packages are pure unit tests and need nothing running. Two packages
+also have **integration tests that exercise a real PostgreSQL database**
+(`internal/cluster`'s repository tests, `internal/database`'s migration
+tests) — they skip themselves cleanly, with a clear reason printed, if
+PostgreSQL isn't reachable. To actually run them, start PostgreSQL first
+(step 3) and load `.env` (step 4) so `NIMBUS_DATABASE_*` points at it; the
+integration tests create and use their own `nimbus_test` database (override
+its name with `NIMBUS_TEST_DATABASE_NAME`), so they never touch your
+`nimbus` development database or its data.
 
-## 10. Stop PostgreSQL
+```bash
+go test -race ./...
+```
+
+runs the same suite with Go's race detector — this repository's concurrency
+(heartbeats, the membership monitor, graceful shutdown) is expected to pass
+cleanly under `-race`.
+
+## 12. Stop PostgreSQL
 
 ```bash
 docker compose -f deployments/docker-compose.yml down
