@@ -1,0 +1,29 @@
+# Environment files (never commit real credentials; see .env.example)
+.env
+.env.*
+!.env.example
+
+# Compiled binaries and build output
+bin/
+dist/
+/control-plane
+/node-agent
+/nimbus
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Go test and coverage output
+*.test
+*.out
+coverage.html
+
+# Go workspace files
+go.work
+go.work.sum
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store

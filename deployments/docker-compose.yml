@@ -1,0 +1,31 @@
+# Local PostgreSQL for Nimbus development.
+#
+# Start:  docker compose -f deployments/docker-compose.yml up -d
+# Stop:   docker compose -f deployments/docker-compose.yml down
+#
+# The control plane itself is not containerized in Phase 1.1 — it runs
+# directly on the host with `go run ./cmd/control-plane`. See
+# docs/development.md for the full walkthrough.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: nimbus-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${NIMBUS_DATABASE_NAME:-nimbus}
+      POSTGRES_USER: ${NIMBUS_DATABASE_USER:-nimbus}
+      POSTGRES_PASSWORD: ${NIMBUS_DATABASE_PASSWORD:-nimbus}
+    ports:
+      - "${NIMBUS_DATABASE_PORT:-5432}:5432"
+    volumes:
+      - nimbus_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${NIMBUS_DATABASE_USER:-nimbus} -d ${NIMBUS_DATABASE_NAME:-nimbus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  # Persists data across `docker compose down`; removed only by `down -v`.
+  nimbus_postgres_data:
