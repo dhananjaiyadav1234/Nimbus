@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
 )
 
 func TestFormatMemory(t *testing.T) {
@@ -93,5 +94,46 @@ func TestRenderNodesTableEmptyClusterStillPrintsHeader(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "NAME") {
 		t.Errorf("empty cluster output missing header: %q", buf.String())
+	}
+}
+
+func TestRenderDeploymentsTableFormatsExpectedColumns(t *testing.T) {
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	deployments := []deploymentapi.DeploymentDTO{
+		{Name: "web", Image: "nginx:latest", Replicas: 2, CPU: 1, MemoryBytes: 536870912, CreatedAt: now.Add(-2 * time.Minute)},
+		{Name: "api", Image: "api:latest", Replicas: 1, CPU: 2, MemoryBytes: 1073741824, CreatedAt: now.Add(-25 * time.Hour)},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderDeploymentsTable(&buf, deployments, now); err != nil {
+		t.Fatalf("RenderDeploymentsTable: %v", err)
+	}
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3 (header + 2 deployments):\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "NAME") || !strings.Contains(lines[0], "IMAGE") ||
+		!strings.Contains(lines[0], "REPLICAS") || !strings.Contains(lines[0], "CPU") ||
+		!strings.Contains(lines[0], "MEMORY") || !strings.Contains(lines[0], "AGE") {
+		t.Errorf("header line missing expected columns: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "web") || !strings.Contains(lines[1], "nginx:latest") ||
+		!strings.Contains(lines[1], "512 MiB") || !strings.Contains(lines[1], "2m ago") {
+		t.Errorf("web row missing expected content: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "api") || !strings.Contains(lines[2], "1 GiB") || !strings.Contains(lines[2], "1d ago") {
+		t.Errorf("api row missing expected content: %q", lines[2])
+	}
+}
+
+func TestRenderDeploymentsTableEmptyStillPrintsHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := RenderDeploymentsTable(&buf, nil, time.Now()); err != nil {
+		t.Fatalf("RenderDeploymentsTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "NAME") {
+		t.Errorf("empty deployments output missing header: %q", buf.String())
 	}
 }

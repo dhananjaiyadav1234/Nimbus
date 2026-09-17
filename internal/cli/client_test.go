@@ -3,12 +3,14 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
 )
 
 func TestControlPlaneClientListNodesSuccess(t *testing.T) {
@@ -99,5 +101,85 @@ func TestFriendlyErrorForUnreachableControlPlane(t *testing.T) {
 	// The whole point of FriendlyError is to never leak raw dial detail.
 	if strings.Contains(got, "dial") || strings.Contains(got, "connect:") || strings.Contains(got, "127.0.0.1") {
 		t.Errorf("FriendlyError(...) leaked low-level detail: %q", got)
+	}
+}
+
+func TestControlPlaneClientCreateDeploymentSuccess(t *testing.T) {
+	var gotBody deploymentapi.Manifest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/deployments" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			t.Errorf("Content-Type = %q, want application/json", ct)
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusCreated)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(deploymentapi.DeploymentDTO{ID: "abc-123", Name: gotBody.Metadata.Name})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	manifest := deploymentapi.Manifest{
+		APIVersion: deploymentapi.SupportedAPIVersion,
+		Kind:       deploymentapi.DeploymentKind,
+		Metadata:   deploymentapi.Metadata{Name: "web"},
+		Spec: deploymentapi.Spec{
+			Image: "nginx:latest", Replicas: 2,
+			Resources: &deploymentapi.Resources{CPU: 1, Memory: "512Mi"},
+		},
+	}
+
+	dto, err := client.CreateDeployment(context.Background(), manifest)
+	if err != nil {
+		t.Fatalf("CreateDeployment: %v", err)
+	}
+	if dto.ID != "abc-123" {
+		t.Errorf("ID = %q, want %q", dto.ID, "abc-123")
+	}
+	if gotBody.Metadata.Name != "web" {
+		t.Errorf("server received name %q, want %q", gotBody.Metadata.Name, "web")
+	}
+}
+
+func TestControlPlaneClientCreateDeploymentConflict(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "a deployment named \"web\" already exists"})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	_, err := client.CreateDeployment(context.Background(), deploymentapi.Manifest{})
+	if err == nil {
+		t.Fatal("CreateDeployment succeeded, want an error")
+	}
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Errorf("error = %v, want a *StatusError with status 409", err)
+	}
+}
+
+func TestControlPlaneClientListDeploymentsSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/deployments" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(deploymentapi.ListDeploymentsResponse{
+			Deployments: []deploymentapi.DeploymentDTO{{Name: "web"}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	resp, err := client.ListDeployments(context.Background())
+	if err != nil {
+		t.Fatalf("ListDeployments: %v", err)
+	}
+	if len(resp.Deployments) != 1 || resp.Deployments[0].Name != "web" {
+		t.Errorf("unexpected response: %+v", resp)
 	}
 }

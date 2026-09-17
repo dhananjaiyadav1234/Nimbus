@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -32,12 +33,19 @@ import (
 // variables the Control Plane itself reads (see internal/config), which
 // `docker compose -f deployments/docker-compose.yml up -d` plus the
 // repository's documented .env already satisfy. The test database itself is
-// named "nimbus_test" (override with NIMBUS_TEST_DATABASE_NAME) so these
-// tests never touch a developer's real "nimbus" database or its data.
+// named "nimbus_test_<calling package>" (e.g. "nimbus_test_cluster",
+// "nimbus_test_deployment") — one database per package, not one shared
+// database for every package's integration tests — so these tests never
+// touch a developer's real "nimbus" database, and, just as importantly, so
+// two packages' test binaries running concurrently (which `go test ./...`
+// does by default) never truncate or overwrite rows a different package's
+// test just wrote to a database they happen to share. Set
+// NIMBUS_TEST_DATABASE_NAME to force one specific shared name instead, if
+// that's ever genuinely what's wanted.
 func Open(t *testing.T) *sql.DB {
 	t.Helper()
 
-	settings := loadSettings()
+	settings := loadSettings(callerPackage())
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -70,16 +78,64 @@ type settings struct {
 	bootstrapDBName                     string
 }
 
-func loadSettings() settings {
+func loadSettings(pkg string) settings {
 	return settings{
 		host:            getenv("NIMBUS_DATABASE_HOST", "localhost"),
 		port:            getenv("NIMBUS_DATABASE_PORT", "5432"),
 		user:            getenv("NIMBUS_DATABASE_USER", "nimbus"),
 		password:        getenv("NIMBUS_DATABASE_PASSWORD", "nimbus"),
 		sslMode:         getenv("NIMBUS_DATABASE_SSL_MODE", "disable"),
-		testDBName:      getenv("NIMBUS_TEST_DATABASE_NAME", "nimbus_test"),
+		testDBName:      getenv("NIMBUS_TEST_DATABASE_NAME", "nimbus_test_"+pkg),
 		bootstrapDBName: getenv("NIMBUS_DATABASE_NAME", "nimbus"),
 	}
+}
+
+// callerPackage returns a Postgres-identifier-safe name derived from the
+// package that called Open two frames up the stack (Open itself, then
+// Open's own caller) — e.g. "deployment", "cluster", "database_test". Every
+// package that calls Open gets its own test database name from this,
+// without needing to pass one explicitly — see Open's doc comment for why
+// that isolation matters.
+func callerPackage() string {
+	pc, _, _, ok := runtime.Caller(2) // 0=callerPackage, 1=Open, 2=Open's caller
+	name := "unknown"
+	if ok {
+		if fn := runtime.FuncForPC(pc); fn != nil {
+			name = fn.Name()
+		}
+	}
+
+	// name looks like ".../internal/deployment.newTestRepository" or
+	// ".../internal/database_test.TestMigrateIsSafeToRunRepeatedly" —
+	// keep only the package's own last path segment.
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.Index(name, "."); i >= 0 {
+		name = name[:i]
+	}
+
+	return sanitizeIdentifierPart(name)
+}
+
+// sanitizeIdentifierPart keeps callerPackage's output safe to splice
+// directly into a CREATE DATABASE statement: Go package names are already
+// well-behaved (no spaces, no quotes), but this is cheap insurance against
+// ever doing otherwise.
+func sanitizeIdentifierPart(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "pkg"
+	}
+	return b.String()
 }
 
 func (s settings) dsn(database string) string {
@@ -135,9 +191,9 @@ func isDuplicateDatabaseError(err error) bool {
 }
 
 // quoteIdentifier double-quotes a PostgreSQL identifier. It is used only
-// with the fixed default "nimbus_test" or an operator-supplied
-// NIMBUS_TEST_DATABASE_NAME in a local development environment, never with
-// untrusted input.
+// with the per-package "nimbus_test_<package>" default (see callerPackage)
+// or an operator-supplied NIMBUS_TEST_DATABASE_NAME in a local development
+// environment, never with untrusted input.
 func quoteIdentifier(name string) string {
 	return `"` + name + `"`
 }
@@ -146,7 +202,7 @@ func quoteIdentifier(name string) string {
 // empty database, without paying the cost of recreating the schema.
 func truncateAll(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec(`TRUNCATE TABLE nodes`); err != nil {
+	if _, err := db.Exec(`TRUNCATE TABLE nodes, deployments`); err != nil {
 		t.Fatalf("dbtest: truncating tables: %v", err)
 	}
 }

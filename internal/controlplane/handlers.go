@@ -41,6 +41,8 @@ type api struct {
 	readinessTimeout time.Duration
 	// nodes is the cluster-membership service behind every /nodes* route.
 	nodes NodeService
+	// deployments is the workload service behind every /deployments* route.
+	deployments DeploymentService
 }
 
 // newRouter wires every Phase 1.1 and Phase 1.2 endpoint.
@@ -76,6 +78,14 @@ func newRouter(a *api) http.Handler {
 
 	mux.HandleFunc("GET /nodes", a.handleListNodes)
 	mux.Handle("/nodes", methodNotAllowed(http.MethodGet))
+
+	mux.HandleFunc("POST /deployments", a.handleCreateDeployment)
+	mux.HandleFunc("GET /deployments", a.handleListDeployments)
+	mux.Handle("/deployments", methodNotAllowed(http.MethodPost, http.MethodGet))
+
+	mux.HandleFunc("GET /deployments/{id}", a.handleGetDeployment)
+	mux.HandleFunc("DELETE /deployments/{id}", a.handleDeleteDeployment)
+	mux.Handle("/deployments/{id}", methodNotAllowed(http.MethodGet, http.MethodDelete))
 
 	mux.HandleFunc("/", handleNotFound)
 

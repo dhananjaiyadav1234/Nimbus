@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
 )
 
 // FormatMemory renders a byte count as a human-readable binary size, e.g.
@@ -44,8 +45,13 @@ func FormatRelativeAge(t *time.Time, now time.Time) string {
 		return fmt.Sprintf("%ds ago", int(d.Seconds()))
 	case d < time.Hour:
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	default:
+	case d < 24*time.Hour:
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	default:
+		// Node heartbeats rarely reach this branch (a node that far behind
+		// is long since NotReady), but a deployment's AGE routinely does —
+		// "3d ago" reads far better than "743h ago".
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
 }
 
@@ -62,6 +68,30 @@ func RenderNodesTable(w io.Writer, nodes []clusterapi.NodeDTO, now time.Time) er
 	for _, n := range nodes {
 		_, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
 			n.Hostname, n.Status, n.CPUCapacity, FormatMemory(n.MemoryCapacityBytes), FormatRelativeAge(n.LastHeartbeatAt, now),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tw.Flush()
+}
+
+// RenderDeploymentsTable writes deployments to w as an aligned,
+// human-readable table:
+//
+//	NAME     IMAGE          REPLICAS     CPU     MEMORY     AGE
+//	web      nginx:latest   2            1       512 MiB    2m ago
+func RenderDeploymentsTable(w io.Writer, deployments []deploymentapi.DeploymentDTO, now time.Time) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 3, ' ', 0)
+
+	if _, err := fmt.Fprintln(tw, "NAME\tIMAGE\tREPLICAS\tCPU\tMEMORY\tAGE"); err != nil {
+		return err
+	}
+	for _, d := range deployments {
+		createdAt := d.CreatedAt
+		_, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%s\n",
+			d.Name, d.Image, d.Replicas, d.CPU, FormatMemory(d.MemoryBytes), FormatRelativeAge(&createdAt, now),
 		)
 		if err != nil {
 			return err

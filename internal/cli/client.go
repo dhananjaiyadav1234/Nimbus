@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
 )
 
 // requestTimeout bounds a single call to the Control Plane.
@@ -49,30 +51,76 @@ func NewControlPlaneClient(baseURL string) *ControlPlaneClient {
 
 // ListNodes calls GET /nodes.
 func (c *ControlPlaneClient) ListNodes(ctx context.Context) (clusterapi.ListNodesResponse, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/nodes", nil)
+	var out clusterapi.ListNodesResponse
+	err := c.do(ctx, http.MethodGet, "/nodes", nil, &out)
+	return out, err
+}
+
+// CreateDeployment calls POST /deployments with manifest as the request
+// body — the same struct the CLI parsed from a YAML file (see
+// deploymentapi's own doc comment for why the wire format and the YAML
+// file format are one type).
+func (c *ControlPlaneClient) CreateDeployment(ctx context.Context, manifest deploymentapi.Manifest) (deploymentapi.DeploymentDTO, error) {
+	var out deploymentapi.DeploymentDTO
+	err := c.do(ctx, http.MethodPost, "/deployments", manifest, &out)
+	return out, err
+}
+
+// ListDeployments calls GET /deployments.
+func (c *ControlPlaneClient) ListDeployments(ctx context.Context) (deploymentapi.ListDeploymentsResponse, error) {
+	var out deploymentapi.ListDeploymentsResponse
+	err := c.do(ctx, http.MethodGet, "/deployments", nil, &out)
+	return out, err
+}
+
+// do sends method/path to the Control Plane, JSON-encoding body if
+// non-nil, and JSON-decodes a successful response into out (if out is
+// non-nil). A non-2xx response is reported as a *StatusError carrying the
+// Control Plane's own {"error": "..."} text.
+func (c *ControlPlaneClient) do(ctx context.Context, method, path string, body, out any) error {
+	var reqBody *bytes.Reader
+	if body != nil {
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encoding request: %w", err)
+		}
+		reqBody = bytes.NewReader(encoded)
+	}
+
+	var req *http.Request
+	var err error
+	if reqBody != nil {
+		req, err = http.NewRequestWithContext(ctx, method, c.baseURL+path, reqBody)
+	} else {
+		req, err = http.NewRequestWithContext(ctx, method, c.baseURL+path, nil)
+	}
 	if err != nil {
-		return clusterapi.ListNodesResponse{}, fmt.Errorf("building request: %w", err)
+		return fmt.Errorf("building request: %w", err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return clusterapi.ListNodesResponse{}, err
+		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var body struct {
+		var errBody struct {
 			Error string `json:"error"`
 		}
-		_ = json.NewDecoder(resp.Body).Decode(&body) // best-effort
-		return clusterapi.ListNodesResponse{}, &StatusError{StatusCode: resp.StatusCode, Message: body.Error}
+		_ = json.NewDecoder(resp.Body).Decode(&errBody) // best-effort
+		return &StatusError{StatusCode: resp.StatusCode, Message: errBody.Error}
 	}
 
-	var out clusterapi.ListNodesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return clusterapi.ListNodesResponse{}, fmt.Errorf("decoding response: %w", err)
+	if out != nil && resp.StatusCode != http.StatusNoContent {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return fmt.Errorf("decoding response: %w", err)
+		}
 	}
-	return out, nil
+	return nil
 }
 
 // FriendlyError converts err into a short, terminal-appropriate message: a
