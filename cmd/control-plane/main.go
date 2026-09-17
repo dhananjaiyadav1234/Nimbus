@@ -19,6 +19,7 @@ import (
 	"github.com/dhananjaiyadav1234/Nimbus/internal/config"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/controlplane"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/database"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/deployment"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/logging"
 )
 
@@ -77,12 +78,19 @@ func run() error {
 		return errors.Join(err, closeDatabase(logger, db))
 	}
 
+	deploymentRepo := deployment.NewPostgresRepository(db.SQL())
+	deploymentService, err := deployment.NewService(deploymentRepo)
+	if err != nil {
+		return errors.Join(err, closeDatabase(logger, db))
+	}
+
 	server, err := controlplane.New(controlplane.Options{
 		Config:           cfg.Server,
 		Logger:           logger,
 		Readiness:        db,
 		ReadinessTimeout: cfg.Database.ConnectTimeout,
 		Nodes:            nodeService,
+		Deployments:      deploymentService,
 	})
 	if err != nil {
 		// Preserve both the original failure and any error closing the

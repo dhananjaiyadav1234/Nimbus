@@ -22,15 +22,17 @@ func testOptions() Options {
 		Readiness:        health.CheckerFunc(func(context.Context) error { return nil }),
 		ReadinessTimeout: time.Second,
 		Nodes:            &stubNodeService{},
+		Deployments:      &stubDeploymentService{},
 	}
 }
 
 func TestNewRejectsMissingDependencies(t *testing.T) {
 	tests := map[string]func(*Options){
-		"missing logger":            func(o *Options) { o.Logger = nil },
-		"missing readiness checker": func(o *Options) { o.Readiness = nil },
-		"zero readiness timeout":    func(o *Options) { o.ReadinessTimeout = 0 },
-		"missing node service":      func(o *Options) { o.Nodes = nil },
+		"missing logger":             func(o *Options) { o.Logger = nil },
+		"missing readiness checker":  func(o *Options) { o.Readiness = nil },
+		"zero readiness timeout":     func(o *Options) { o.ReadinessTimeout = 0 },
+		"missing node service":       func(o *Options) { o.Nodes = nil },
+		"missing deployment service": func(o *Options) { o.Deployments = nil },
 	}
 
 	for name, mutate := range tests {

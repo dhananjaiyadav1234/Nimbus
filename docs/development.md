@@ -9,7 +9,7 @@ service is required.
 - [Git](https://git-scm.com/)
 - [Go](https://go.dev/dl/) 1.25 or later (`go version`) — this is the minimum
   required by the `github.com/jackc/pgx/v5` driver, not an arbitrary choice
-- [Docker](https://www.docker.com/) with Compose v2 (`docker compose version`)
+- [Docker](https://www.docker.com/) with Compose v2 (`docker compose version`) — used both to run PostgreSQL (steps 3+) and, separately, as the container runtime the Node Agent's `internal/runtime/docker` integration tests exercise (step 14)
 
 ## 2. Clone the repository
 
@@ -175,7 +175,67 @@ non-default Control Plane. With the control plane stopped, it prints
 `error: unable to connect to Nimbus control plane` and exits non-zero,
 rather than a raw connection error.
 
-## 10. Stop everything
+## 10. Deploy a workload
+
+With the control plane still running, create a manifest:
+
+```bash
+cat > web.yaml <<'YAML'
+apiVersion: nimbus/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: nginx:latest
+  replicas: 2
+  resources:
+    cpu: 1
+    memory: 512Mi
+YAML
+```
+
+Submit it:
+
+```bash
+go run ./cmd/nimbus deploy -f web.yaml
+```
+
+```
+deployment "web" created (id: 5c9c4c0a-...-f0e21b7c9a41, replicas: 2)
+```
+
+Confirm it's there — through the CLI, and directly through the API:
+
+```bash
+go run ./cmd/nimbus deployment list
+```
+
+```
+NAME     IMAGE          REPLICAS     CPU     MEMORY     AGE
+web      nginx:latest   2            1       512 MiB    4s ago
+```
+
+```bash
+curl -s http://localhost:8080/deployments
+curl -s http://localhost:8080/deployments/<id-from-the-list-above>
+```
+
+Submitting the same manifest again fails with `409 Conflict` (names are
+unique — see [`docs/workloads.md`](workloads.md#deployment-identity-and-idempotency)),
+not a silent duplicate or update.
+
+Delete it:
+
+```bash
+curl -s -X DELETE -o /dev/null -w '%{http_code}\n' http://localhost:8080/deployments/<id>
+go run ./cmd/nimbus deployment list   # empty again
+```
+
+**This does not start, stop, or touch any container.** Phase 2.1 persists
+desired state only — see [`docs/workloads.md`](workloads.md#scope-boundary)
+for exactly what is and isn't implemented yet, and why.
+
+## 11. Stop everything
 
 Stop the agents (`kill %1 %2 %3`, or `Ctrl+C` in each terminal), then the
 control plane (`Ctrl+C` in its terminal). The control plane's shutdown log
@@ -196,7 +256,7 @@ left running — no deregistration call is made (see
 [`docs/cluster-membership.md`](cluster-membership.md#graceful-shutdown)); a
 stopped agent's node simply becomes `NotReady` once its heartbeat is missed.
 
-## 11. Run automated tests
+## 12. Run automated tests
 
 ```bash
 go test ./...
@@ -220,7 +280,7 @@ runs the same suite with Go's race detector — this repository's concurrency
 (heartbeats, the membership monitor, graceful shutdown) is expected to pass
 cleanly under `-race`.
 
-## 12. Stop PostgreSQL
+## 13. Stop PostgreSQL
 
 ```bash
 docker compose -f deployments/docker-compose.yml down
@@ -232,3 +292,25 @@ data, add `-v`:
 ```bash
 docker compose -f deployments/docker-compose.yml down -v
 ```
+
+## 14. Run the container runtime integration tests
+
+Separately from the PostgreSQL-backed Control Plane, the Node Agent's
+container runtime (`internal/runtime/docker`) has its own integration tests
+against a real Docker Engine — Docker Desktop or any other reachable Docker
+Engine works, and it does not need to be the same Docker Engine PostgreSQL
+runs alongside (it isn't a container here at all; it's the thing being
+tested):
+
+```bash
+docker pull nginx:latest
+docker pull busybox:latest
+
+go test ./internal/runtime/docker/...
+```
+
+Like the PostgreSQL integration tests, these skip themselves cleanly with a
+clear printed reason if no Docker Engine is reachable — they never
+silently pass, and `go test ./...` never fails just because Docker happens
+to be stopped. See [`docs/workloads.md`](workloads.md#running-the-docker-integration-tests)
+for what they cover.

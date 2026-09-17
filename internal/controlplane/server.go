@@ -39,6 +39,8 @@ type Options struct {
 	ReadinessTimeout time.Duration
 	// Nodes backs every /nodes* route. Required.
 	Nodes NodeService
+	// Deployments backs every /deployments* route. Required.
+	Deployments DeploymentService
 }
 
 // Server is the control plane HTTP service.
@@ -64,12 +66,16 @@ func New(opts Options) (*Server, error) {
 	if opts.Nodes == nil {
 		return nil, errors.New("controlplane: node service is required")
 	}
+	if opts.Deployments == nil {
+		return nil, errors.New("controlplane: deployment service is required")
+	}
 
 	handler := newRouter(&api{
 		logger:           opts.Logger,
 		readiness:        opts.Readiness,
 		readinessTimeout: opts.ReadinessTimeout,
 		nodes:            opts.Nodes,
+		deployments:      opts.Deployments,
 	})
 
 	return &Server{
