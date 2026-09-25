@@ -6,10 +6,13 @@ PostgreSQL-backed persistence, the Control Plane's `/deployments` API, the
 container runtime abstraction.
 
 **Phase 2.1 persists desired deployments and introduces the container
-runtime abstraction. Scheduling and automatic placement are not yet
-implemented** — see [Scope boundary](#scope-boundary) below. This document
-assumes you've read [`docs/cluster-membership.md`](cluster-membership.md)
-for the Phase 1.2 foundation this builds on.
+runtime abstraction.** This document covers the workload model, validation,
+persistence, and the `/deployments` API — see [Scope boundary](#scope-boundary)
+below for exactly what Phase 2.1 itself does and does not do. Scheduling
+and placement are implemented separately, in Phase 2.2, and documented in
+[`docs/scheduling.md`](scheduling.md). This document assumes you've read
+[`docs/cluster-membership.md`](cluster-membership.md) for the Phase 1.2
+foundation this builds on.
 
 ## Architecture
 
