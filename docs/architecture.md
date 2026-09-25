@@ -1,7 +1,7 @@
 # Architecture
 
 This document describes the Nimbus architecture **as it exists today**
-(through Phase 2.1) and, separately, how it is expected to grow. Nothing
+(through Phase 2.2) and, separately, how it is expected to grow. Nothing
 under "Planned" is implemented — it exists only to explain why the current
 code is organized the way it is.
 
@@ -14,20 +14,21 @@ code is organized the way it is.
                 Nimbus Control Plane
         (cmd/control-plane, internal/controlplane)
                           │
-              ┌───────────┼───────────┐
-              │  registration/heartbeat│
-              ▼           │           ▼
-        Node Agent A      │      Node Agent B  ...
-   (cmd/node-agent, internal/nodeagent)
-                          │
-                          ▼
-                     PostgreSQL
+              ┌───────────┼───────────┬───────────────┐
+              │  registration/heartbeat│               │
+              ▼           │           ▼               ▼
+        Node Agent A      │      Node Agent B  ...  Scheduler
+   (cmd/node-agent, internal/nodeagent)              (internal/scheduler,
+                          │                            Phase 2.2)
+                          ▼                             │
+                     PostgreSQL  ◄───────────────────────┘
              (deployments/docker-compose.yml)
-        `nodes` table + `deployments` table
+   `nodes` table + `deployments` table + `deployment_placements` table
 
 Node Agent ── internal/runtime.ContainerRuntime ── internal/runtime/docker ── Docker Engine
-   (implemented and independently tested; not yet connected to deployment
-    creation above — there is no scheduler yet. See docs/workloads.md.)
+   (implemented and independently tested; not yet connected to the
+    scheduler above — a placement is a decision, not a running container.
+    See docs/scheduling.md.)
 ```
 
 The **control plane** is one binary and one process; there is exactly one of
@@ -54,8 +55,15 @@ On startup, the control plane:
    - `POST /deployments`, `GET /deployments`, `GET /deployments/{id}`,
      `DELETE /deployments/{id}` — desired workload state (Phase 2.1). See
      [`docs/workloads.md`](workloads.md) for the full contract.
+   - `POST /deployments/{id}/schedule`, `GET /deployments/{id}/placements`
+     — placement decisions (Phase 2.2). See
+     [`docs/scheduling.md`](scheduling.md) for the full contract.
+     `POST /deployments` itself never triggers scheduling — it remains
+     persistence-only.
 6. Starts the membership monitor (`internal/cluster.Monitor`) — its one
    background goroutine, sweeping for nodes that stopped heartbeating.
+   Scheduling has no background goroutine: it only ever runs synchronously,
+   inside a `POST /deployments/{id}/schedule` request.
 7. Shuts down gracefully on `SIGINT`/`SIGTERM`: stops accepting new
    requests, lets in-flight requests finish, cancels and waits for the
    membership monitor, closes the database, and logs each step.
@@ -70,9 +78,11 @@ about it.
 
 A node agent's container runtime (`internal/runtime`, backed by
 `internal/runtime/docker`) is fully implemented and independently tested,
-but nothing in the current agent process calls it yet — there is no
-scheduler to assign it any work. See [`docs/workloads.md`](workloads.md)
-for exactly what exists and why it isn't wired up yet.
+but nothing in the current agent process calls it yet. Phase 2.2 adds the
+scheduler that decides *which* node a replica belongs on, but stops at the
+placement decision itself — it does not call any node's
+`ContainerRuntime`. See [`docs/scheduling.md`](scheduling.md) for exactly
+what exists and why it isn't wired up yet.
 
 ### Components
 
@@ -80,7 +90,7 @@ for exactly what exists and why it isn't wired up yet.
 |---|---|
 | `cmd/control-plane` | Control plane entry point: builds dependencies and wires them together. No business logic. |
 | `cmd/node-agent` | Node agent entry point: same role, for the agent process. |
-| `cmd/nimbus` | CLI entry point: parses `node list` / `deployment list` / `deploy -f`, calls the control plane's API, prints a table or confirmation. |
+| `cmd/nimbus` | CLI entry point: parses `node list` / `deployment list` / `deploy -f` / `deployment schedule` / `deployment placements`, calls the control plane's API, prints a table or confirmation. |
 | `internal/config` | Reads and validates *all* environment-derived configuration — for both the control plane (`Load`) and the node agent (`LoadNodeAgent`) — in one place. |
 | `internal/logging` | Builds the `log/slog` logger used everywhere. |
 | `internal/database` | Owns the PostgreSQL connection pool (connect, ping-based check, close) and the migration runner. |
@@ -94,22 +104,26 @@ for exactly what exists and why it isn't wired up yet.
 | `internal/deploymentapi` | The wire contract (`Manifest`, `DeploymentDTO`, ...) shared by the control plane's handlers and the CLI — the YAML manifest format and the JSON API body are the same type. |
 | `internal/runtime` | The `ContainerRuntime` interface, `ContainerSpec`/`ContainerStatus`, container naming/labels (`naming.go`), and `FakeRuntime` for tests. Backend-independent — nothing here imports Docker. |
 | `internal/runtime/docker` | `ContainerRuntime` implemented against a real Docker Engine via Docker's official Go client — never the `docker` CLI, never `exec.Command`. |
+| `internal/scheduler` | Scheduling domain: the `Placement` model, resource accounting (`resources.go`), the deterministic best-fit algorithm (`scheduler.go`), `Repository` (all SQL, including the row-locking transaction strategy), `Service`. Depends on `internal/deployment` for desired state; reads the `nodes` table directly for Ready-node capacity. Never imports Docker. See [`docs/scheduling.md`](scheduling.md). |
+| `internal/schedulerapi` | The wire contract (`ScheduleResponse`, `PlacementDTO`, ...) shared by the control plane's handlers and the CLI. |
 | `internal/cli` | The `nimbus` CLI's HTTP client, YAML manifest parsing (`manifest.go`), and terminal-table formatting — talks to the control plane's API only, never PostgreSQL or Docker. |
 
 ## Database
 
-Two tables: `nodes` (see [`docs/cluster-membership.md`](cluster-membership.md#node-model))
-and `deployments` (see [`docs/workloads.md`](workloads.md)), created by
-`internal/database/migrations/0001_create_nodes.sql` and
-`0002_create_deployments.sql` respectively. Migrations are embedded into the
-control plane binary (`//go:embed`) and applied by `internal/database.Migrate`
-on every startup: a `schema_migrations` table tracks which have already run,
-each migration applies inside its own transaction, and a PostgreSQL advisory
-lock serialises the whole process against another Nimbus instance migrating
-the same database concurrently. This is a small, hand-rolled runner rather
-than an external migration framework — two migrations doesn't justify one,
-and existing migration files are never edited, only added to (Phase 1.2's
-`0001_create_nodes.sql` is untouched by this phase).
+Three tables: `nodes` (see [`docs/cluster-membership.md`](cluster-membership.md#node-model)),
+`deployments` (see [`docs/workloads.md`](workloads.md)), and
+`deployment_placements` (see [`docs/scheduling.md`](scheduling.md)),
+created by `internal/database/migrations/0001_create_nodes.sql`,
+`0002_create_deployments.sql`, and `0003_create_deployment_placements.sql`
+respectively. Migrations are embedded into the control plane binary
+(`//go:embed`) and applied by `internal/database.Migrate` on every startup:
+a `schema_migrations` table tracks which have already run, each migration
+applies inside its own transaction, and a PostgreSQL advisory lock
+serialises the whole process against another Nimbus instance migrating the
+same database concurrently. This is a small, hand-rolled runner rather than
+an external migration framework — three migrations doesn't justify one, and
+existing migration files are never edited, only added to (`0001` and `0002`
+are untouched by this phase).
 
 ## Why this is modular
 
@@ -133,10 +147,13 @@ make that possible without disturbing existing code:
   JSON shape — a field renamed there fails to compile everywhere it
   matters, instead of silently drifting.
 - **`internal/runtime.ContainerRuntime` is a Docker-independent interface.**
-  The Node Agent (and, in Phase 2.2, the scheduler) depends on it, not on
-  `internal/runtime/docker` directly — a future non-Docker runtime, or a
-  test using `internal/runtime.FakeRuntime`, is a substitution, not a
-  rewrite of anything that calls it.
+  The Node Agent depends on it, not on `internal/runtime/docker` directly —
+  a future non-Docker runtime, or a test using `internal/runtime.FakeRuntime`,
+  is a substitution, not a rewrite of anything that calls it. Note that
+  `internal/scheduler` (Phase 2.2) does **not** depend on it at all — the
+  scheduler's output is a placement decision, not a container, so it has no
+  reason to know `ContainerRuntime` exists; see
+  [`docs/scheduling.md`](scheduling.md).
 - **`cmd/*/main.go` files only construct and wire dependencies.** Adding a
   component means constructing it in the relevant `main.go` and passing it
   to whatever already-existing piece needs it — none of them accumulate
@@ -154,23 +171,19 @@ not something to back into accidentally now.
 
 Future phases are expected to add, roughly in this order:
 
-- **Phase 2.2 — Scheduling**: a scheduler component that consumes
-  `cluster.Service` (node capacity/status) and `deployment.Service`
-  (desired workloads) to decide which `Ready` node should run each
-  deployment's replicas, then calls that node's Node Agent — which already
-  has a working `internal/runtime.ContainerRuntime` waiting for exactly
-  this, per [`docs/workloads.md`](workloads.md).
 - **Phase 3 — Self-healing & reliability**: a reconciliation loop that
-  compares desired vs. actual workload state (the node-level health
-  tracked since Phase 1.2, and the desired-state persistence added in
-  Phase 2.1, are both building blocks for this, not this itself).
+  compares desired vs. actual workload state and, for the first time,
+  actually calls a node's `ContainerRuntime` to create a container from a
+  placement — connecting the scheduler's decisions (Phase 2.2) to the
+  container runtime (Phase 2.1) is itself part of this phase's work, not
+  something either prior phase did. Also: automatic container restart and
+  node-failure-triggered rescheduling.
 - **Phase 4 — Networking & observability**: service discovery, load
   balancing, and metrics/tracing.
 - **Phase 5 — Advanced features & release**: deployment strategies (rolling,
   blue/green, etc.), scaling, and authentication.
 
-None of scheduling, placement, replicas actually running anywhere,
-reconciliation, self-healing, service discovery, load balancing, a
-dashboard, authentication, or autoscaling exist in the codebase today. They
-are listed here only to explain the intent behind the current package
-boundaries.
+None of a replica actually running anywhere, reconciliation, self-healing,
+service discovery, load balancing, a dashboard, authentication, or
+autoscaling exist in the codebase today. They are listed here only to
+explain the intent behind the current package boundaries.

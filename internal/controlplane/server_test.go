@@ -23,6 +23,7 @@ func testOptions() Options {
 		ReadinessTimeout: time.Second,
 		Nodes:            &stubNodeService{},
 		Deployments:      &stubDeploymentService{},
+		Scheduler:        &stubSchedulerService{},
 	}
 }
 
@@ -33,6 +34,7 @@ func TestNewRejectsMissingDependencies(t *testing.T) {
 		"zero readiness timeout":     func(o *Options) { o.ReadinessTimeout = 0 },
 		"missing node service":       func(o *Options) { o.Nodes = nil },
 		"missing deployment service": func(o *Options) { o.Deployments = nil },
+		"missing scheduler service":  func(o *Options) { o.Scheduler = nil },
 	}
 
 	for name, mutate := range tests {

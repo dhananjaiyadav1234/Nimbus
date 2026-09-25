@@ -41,6 +41,9 @@ type Options struct {
 	Nodes NodeService
 	// Deployments backs every /deployments* route. Required.
 	Deployments DeploymentService
+	// Scheduler backs /deployments/{id}/schedule and
+	// /deployments/{id}/placements. Required.
+	Scheduler SchedulerService
 }
 
 // Server is the control plane HTTP service.
@@ -69,6 +72,9 @@ func New(opts Options) (*Server, error) {
 	if opts.Deployments == nil {
 		return nil, errors.New("controlplane: deployment service is required")
 	}
+	if opts.Scheduler == nil {
+		return nil, errors.New("controlplane: scheduler service is required")
+	}
 
 	handler := newRouter(&api{
 		logger:           opts.Logger,
@@ -76,6 +82,7 @@ func New(opts Options) (*Server, error) {
 		readinessTimeout: opts.ReadinessTimeout,
 		nodes:            opts.Nodes,
 		deployments:      opts.Deployments,
+		scheduler:        opts.Scheduler,
 	})
 
 	return &Server{

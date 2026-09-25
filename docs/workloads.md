@@ -83,7 +83,7 @@ rather than two independently-drifting definitions. Equivalently, as JSON:
 | `kind` | Must be exactly `Deployment`. |
 | `metadata.name` | Unique identity (see below). `[a-z0-9]([-a-z0-9]*[a-z0-9])?`, up to 63 characters — the same shape as a DNS label (RFC 1035), chosen for the same practical reason Kubernetes-style tooling converges on it: it's safe to use directly in a container name (see [Container naming and labels](#container-naming-and-labels)) without escaping. |
 | `spec.image` | Non-empty, no whitespace/control characters, up to 255 characters. Not validated against full Docker image reference grammar — a deliberately light check, not a registry client. |
-| `spec.replicas` | `0` to `1000` inclusive. The upper bound is a sanity ceiling, not a capacity figure — there is no scheduler yet to place any of them. |
+| `spec.replicas` | `0` to `1000` inclusive. The upper bound is a sanity ceiling, not a capacity figure. (Phase 2.2's scheduler, documented separately in [`docs/scheduling.md`](scheduling.md), is what actually places them — creating a deployment here never does.) |
 | `spec.resources.cpu` | Integer CPU count (whole cores), `> 0`, capped at `1024` (sanity ceiling, same reasoning as replicas). Kubernetes-style milli-CPU units are deliberately not implemented — nothing in Phase 2.1 needs sub-core granularity. |
 | `spec.resources.memory` | Human-readable quantity, e.g. `512Mi`, `1Gi`. `spec.resources` itself must be present. |
 
@@ -161,15 +161,17 @@ POST /deployments  →  validate  →  PostgreSQL row created  →  201 Created
 DELETE /deployments/{id}  →  PostgreSQL row removed  →  204 No Content
 ```
 
-**`DELETE` removes only the desired-state row.** It does **not** find any
-node, stop any container, or remove any replica — Phase 2.1 has no
-scheduler and therefore no record of which node, if any, is running
-anything for a deployment. There is nothing else to clean up yet, because
-nothing has been placed anywhere yet. Once Phase 2.2 (scheduling) and
-Phase 3 (reconciliation) exist, deletion will drive real cleanup through
-that desired-state/reconciliation loop — deliberately not implemented here
-as a shortcut now, since that would create exactly the kind of
-architectural debt this phased structure exists to avoid.
+**`DELETE` removes only the desired-state row.** It does **not** stop any
+container or contact any node — nothing creates a container yet (see
+"Scope boundary" below). Its placement rows, if Phase 2.2's scheduler had
+created any, are removed automatically by the database itself
+(`deployment_placements.deployment_id` is `ON DELETE CASCADE` — see
+[`docs/scheduling.md`](scheduling.md)), not by any application-level
+cleanup logic here. Once Phase 3 (reconciliation) exists, deletion will
+also need to drive real container cleanup through that
+desired-state/reconciliation loop — deliberately not implemented here as a
+shortcut now, since that would create exactly the kind of architectural
+debt this phased structure exists to avoid.
 
 ## Control Plane API
 
@@ -227,10 +229,10 @@ nimbus-<deployment-name>-<instance>
 ```
 
 e.g. `nimbus-web-0`. `instance` distinguishes one deployment's replicas
-from each other. Phase 2.1 has no scheduler to ever create more than a
-conceptual "replica 0", but the naming scheme is shaped for Phase 2.2 from
-the start, rather than hard-coding a single instance and having to redesign
-the scheme later.
+from each other — Phase 2.2's scheduler (see
+[`docs/scheduling.md`](scheduling.md)) now assigns a real placement per
+replica index, though nothing yet turns that placement into an actual
+container carrying this name; that connection is future work (Phase 3).
 
 Every Nimbus-created container also carries labels
 (`internal/runtime.ContainerLabels`):
@@ -331,19 +333,23 @@ Docker itself — not merely round-tripped through Nimbus's own code.
 ## Scope boundary
 
 Explicitly **not** implemented in Phase 2.1 — each belongs to a specific
-later phase, and none of it exists anywhere in this codebase yet:
+later phase:
 
-| Not implemented | Belongs to |
-|---|---|
-| Scheduler, placement, bin packing, node scoring, replica assignment | Phase 2.2 |
-| `POST /deployments/{id}/scale`, `/restart`, `/rollback` | Phase 2.2+ |
-| Reconciliation, desired-vs-actual comparison, automatic container restart, node-failure rescheduling | Phase 3 |
-| Service discovery, DNS, load balancing, overlay networking | Phase 4 |
-| Autoscaling (CPU/memory-triggered replica changes) | Phase 5 |
-| Authentication | Phase 5 |
+| Not implemented (as of Phase 2.1) | Belongs to | Status |
+|---|---|---|
+| Scheduler, placement, bin packing, node scoring, replica assignment | Phase 2.2 | ✓ now implemented — see [`docs/scheduling.md`](scheduling.md) |
+| `POST /deployments/{id}/scale`, `/restart`, `/rollback` | Phase 2.2+ | still not implemented |
+| Reconciliation, desired-vs-actual comparison, automatic container restart, node-failure rescheduling | Phase 3 | still not implemented |
+| Service discovery, DNS, load balancing, overlay networking | Phase 4 | still not implemented |
+| Autoscaling (CPU/memory-triggered replica changes) | Phase 5 | still not implemented |
+| Authentication | Phase 5 | still not implemented |
 
-Most importantly: **`POST /deployments` does not create a container.** The
-row lands in PostgreSQL and nothing else happens. Wiring registration
-straight to Docker would skip the scheduler entirely and bake in exactly
-the architectural debt this phased structure is designed to prevent —
-see the architecture diagram at the top of this document.
+Most importantly: **`POST /deployments` does not create a container**, and
+still doesn't after Phase 2.2 — the row lands in PostgreSQL and nothing
+else happens. Scheduling a deployment (`POST /deployments/{id}/schedule`,
+Phase 2.2) doesn't create one either: it only decides and persists *where*
+a replica would go. Wiring either of those straight to Docker would skip a
+deliberate phase boundary and bake in exactly the architectural debt this
+phased structure is designed to prevent — see
+[`docs/scheduling.md`](scheduling.md#scope-boundary) for the current,
+authoritative version of this boundary.

@@ -8,6 +8,7 @@ import (
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/schedulerapi"
 )
 
 // FormatMemory renders a byte count as a human-readable binary size, e.g.
@@ -69,6 +70,31 @@ func RenderNodesTable(w io.Writer, nodes []clusterapi.NodeDTO, now time.Time) er
 		_, err := fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n",
 			n.Hostname, n.Status, n.CPUCapacity, FormatMemory(n.MemoryCapacityBytes), FormatRelativeAge(n.LastHeartbeatAt, now),
 		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tw.Flush()
+}
+
+// RenderPlacementsTable writes placements to w as an aligned,
+// human-readable table:
+//
+//	REPLICA     NODE ID                                CPU     MEMORY
+//	0           3fa85f64-5717-4562-b3fc-2c963f66afa6   1       512 MiB
+//
+// An empty placements slice still prints the header — the caller (see
+// cmd/nimbus) is responsible for telling the operator that means "not
+// scheduled yet" rather than leaving a bare header to speak for itself.
+func RenderPlacementsTable(w io.Writer, placements []schedulerapi.PlacementDTO) error {
+	tw := tabwriter.NewWriter(w, 0, 4, 3, ' ', 0)
+
+	if _, err := fmt.Fprintln(tw, "REPLICA\tNODE ID\tCPU\tMEMORY"); err != nil {
+		return err
+	}
+	for _, p := range placements {
+		_, err := fmt.Fprintf(tw, "%d\t%s\t%d\t%s\n", p.ReplicaIndex, p.NodeID, p.CPU, FormatMemory(p.MemoryBytes))
 		if err != nil {
 			return err
 		}

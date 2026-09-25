@@ -8,6 +8,8 @@
 //	nimbus node list
 //	nimbus deployment list
 //	nimbus deploy -f <manifest.yaml>
+//	nimbus deployment schedule <name|id>
+//	nimbus deployment placements <name|id>
 package main
 
 import (
@@ -47,8 +49,15 @@ func run(args []string) error {
 			return runNodeList(args[2:])
 		}
 	case "deployment":
-		if len(args) >= 2 && args[1] == "list" {
-			return runDeploymentList(args[2:])
+		if len(args) >= 2 {
+			switch args[1] {
+			case "list":
+				return runDeploymentList(args[2:])
+			case "schedule":
+				return runDeploymentSchedule(args[2:])
+			case "placements":
+				return runDeploymentPlacements(args[2:])
+			}
 		}
 	case "deploy":
 		return runDeploy(args[1:])
@@ -56,7 +65,7 @@ func run(args []string) error {
 	return errUsage
 }
 
-var errUsage = fmt.Errorf("usage:\n  nimbus node list\n  nimbus deployment list\n  nimbus deploy -f <manifest.yaml>")
+var errUsage = fmt.Errorf("usage:\n  nimbus node list\n  nimbus deployment list\n  nimbus deploy -f <manifest.yaml>\n  nimbus deployment schedule <name|id>\n  nimbus deployment placements <name|id>")
 
 func runNodeList(args []string) error {
 	fs := flag.NewFlagSet("nimbus node list", flag.ContinueOnError)
@@ -128,6 +137,74 @@ func runDeploy(args []string) error {
 
 	fmt.Printf("deployment %q created (id: %s, replicas: %d)\n", deployment.Name, deployment.ID, deployment.Replicas)
 	return nil
+}
+
+// runDeploymentSchedule implements `nimbus deployment schedule <name|id>`.
+// This is the only CLI command that ever calls the scheduling endpoint —
+// `nimbus deploy` never triggers scheduling itself, matching the Control
+// Plane's own persistence-only POST /deployments contract. It contains no
+// scheduling logic of its own: resolving name to ID and rendering the
+// result are the only local work, everything else is the Control Plane's
+// POST /deployments/{id}/schedule response.
+func runDeploymentSchedule(args []string) error {
+	fs := flag.NewFlagSet("nimbus deployment schedule", flag.ContinueOnError)
+	controlPlaneURL := controlPlaneFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: nimbus deployment schedule <name|id>")
+	}
+	nameOrID := fs.Arg(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	client := cli.NewControlPlaneClient(*controlPlaneURL)
+	id, err := cli.ResolveDeploymentID(ctx, client, nameOrID)
+	if err != nil {
+		return friendlyErr(err)
+	}
+
+	resp, err := client.ScheduleDeployment(ctx, id)
+	if err != nil {
+		return friendlyErr(err)
+	}
+
+	fmt.Printf("deployment %q scheduled (%d placement(s))\n", nameOrID, len(resp.Placements))
+	return cli.RenderPlacementsTable(os.Stdout, resp.Placements)
+}
+
+// runDeploymentPlacements implements `nimbus deployment placements <name|id>`.
+func runDeploymentPlacements(args []string) error {
+	fs := flag.NewFlagSet("nimbus deployment placements", flag.ContinueOnError)
+	controlPlaneURL := controlPlaneFlag(fs)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return fmt.Errorf("usage: nimbus deployment placements <name|id>")
+	}
+	nameOrID := fs.Arg(0)
+
+	ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
+	defer cancel()
+
+	client := cli.NewControlPlaneClient(*controlPlaneURL)
+	id, err := cli.ResolveDeploymentID(ctx, client, nameOrID)
+	if err != nil {
+		return friendlyErr(err)
+	}
+
+	resp, err := client.GetPlacements(ctx, id)
+	if err != nil {
+		return friendlyErr(err)
+	}
+	if len(resp.Placements) == 0 {
+		fmt.Printf("deployment %q has no placements yet — run `nimbus deployment schedule %s`\n", nameOrID, nameOrID)
+		return nil
+	}
+	return cli.RenderPlacementsTable(os.Stdout, resp.Placements)
 }
 
 func controlPlaneFlag(fs *flag.FlagSet) *string {

@@ -21,6 +21,7 @@ import (
 	"github.com/dhananjaiyadav1234/Nimbus/internal/database"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/deployment"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/logging"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/scheduler"
 )
 
 func main() {
@@ -84,6 +85,12 @@ func run() error {
 		return errors.Join(err, closeDatabase(logger, db))
 	}
 
+	schedulerRepo := scheduler.NewPostgresRepository(db.SQL())
+	schedulerService, err := scheduler.NewService(schedulerRepo, deploymentService)
+	if err != nil {
+		return errors.Join(err, closeDatabase(logger, db))
+	}
+
 	server, err := controlplane.New(controlplane.Options{
 		Config:           cfg.Server,
 		Logger:           logger,
@@ -91,6 +98,7 @@ func run() error {
 		ReadinessTimeout: cfg.Database.ConnectTimeout,
 		Nodes:            nodeService,
 		Deployments:      deploymentService,
+		Scheduler:        schedulerService,
 	})
 	if err != nil {
 		// Preserve both the original failure and any error closing the
