@@ -8,6 +8,7 @@ import (
 
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/schedulerapi"
 )
 
 func TestFormatMemory(t *testing.T) {
@@ -135,5 +136,43 @@ func TestRenderDeploymentsTableEmptyStillPrintsHeader(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "NAME") {
 		t.Errorf("empty deployments output missing header: %q", buf.String())
+	}
+}
+
+func TestRenderPlacementsTableFormatsExpectedColumns(t *testing.T) {
+	placements := []schedulerapi.PlacementDTO{
+		{ReplicaIndex: 0, NodeID: "node-a-id", CPU: 1, MemoryBytes: 536870912},
+		{ReplicaIndex: 1, NodeID: "node-b-id", CPU: 2, MemoryBytes: 1073741824},
+	}
+
+	var buf bytes.Buffer
+	if err := RenderPlacementsTable(&buf, placements); err != nil {
+		t.Fatalf("RenderPlacementsTable: %v", err)
+	}
+
+	out := buf.String()
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+	if len(lines) != 3 {
+		t.Fatalf("got %d lines, want 3 (header + 2 placements):\n%s", len(lines), out)
+	}
+	if !strings.Contains(lines[0], "REPLICA") || !strings.Contains(lines[0], "NODE ID") ||
+		!strings.Contains(lines[0], "CPU") || !strings.Contains(lines[0], "MEMORY") {
+		t.Errorf("header line missing expected columns: %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "0") || !strings.Contains(lines[1], "node-a-id") || !strings.Contains(lines[1], "512 MiB") {
+		t.Errorf("replica 0 row missing expected content: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "1") || !strings.Contains(lines[2], "node-b-id") || !strings.Contains(lines[2], "1 GiB") {
+		t.Errorf("replica 1 row missing expected content: %q", lines[2])
+	}
+}
+
+func TestRenderPlacementsTableEmptyStillPrintsHeader(t *testing.T) {
+	var buf bytes.Buffer
+	if err := RenderPlacementsTable(&buf, nil); err != nil {
+		t.Fatalf("RenderPlacementsTable: %v", err)
+	}
+	if !strings.Contains(buf.String(), "REPLICA") {
+		t.Errorf("empty placements output missing header: %q", buf.String())
 	}
 }

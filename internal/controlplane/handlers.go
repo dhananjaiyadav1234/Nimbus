@@ -43,6 +43,9 @@ type api struct {
 	nodes NodeService
 	// deployments is the workload service behind every /deployments* route.
 	deployments DeploymentService
+	// scheduler is the scheduling service behind /deployments/{id}/schedule
+	// and /deployments/{id}/placements.
+	scheduler SchedulerService
 }
 
 // newRouter wires every Phase 1.1 and Phase 1.2 endpoint.
@@ -86,6 +89,18 @@ func newRouter(a *api) http.Handler {
 	mux.HandleFunc("GET /deployments/{id}", a.handleGetDeployment)
 	mux.HandleFunc("DELETE /deployments/{id}", a.handleDeleteDeployment)
 	mux.Handle("/deployments/{id}", methodNotAllowed(http.MethodGet, http.MethodDelete))
+
+	// These are distinct, longer patterns than "/deployments/{id}" — Go's
+	// ServeMux matches by path segment count unless a pattern ends in a
+	// "..." wildcard, and neither of these does, so "/deployments/{id}"
+	// (exactly two segments) never matches a three-segment
+	// "/deployments/X/schedule" path. No conflict-avoidance trick like
+	// "GET /nodes/register" above is needed here.
+	mux.HandleFunc("POST /deployments/{id}/schedule", a.handleScheduleDeployment)
+	mux.Handle("/deployments/{id}/schedule", methodNotAllowed(http.MethodPost))
+
+	mux.HandleFunc("GET /deployments/{id}/placements", a.handleGetPlacements)
+	mux.Handle("/deployments/{id}/placements", methodNotAllowed(http.MethodGet))
 
 	mux.HandleFunc("/", handleNotFound)
 

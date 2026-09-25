@@ -11,7 +11,7 @@ run each kind.
 This directory is reserved for tests that don't belong to a single package —
 for example, a black-box end-to-end suite that starts the actual
 `control-plane` and `node-agent` binaries against a real PostgreSQL instance.
-Nothing through Phase 2.1 needs that yet; every requirement so far is covered
+Nothing through Phase 2.2 needs that yet; every requirement so far is covered
 at the package level:
 
 - [`internal/config`](../internal/config/config_test.go) — configuration
@@ -24,10 +24,19 @@ at the package level:
   the real SQL behind it, including the mandatory concurrent-creation test
   (integration, against PostgreSQL — see
   [`docs/workloads.md`](../docs/workloads.md))
+- [`internal/scheduler`](../internal/scheduler) — the deterministic
+  best-fit algorithm (unit), resource-accounting overflow safety (unit),
+  and the real transactional locking behind it, including the mandatory
+  concurrent-scheduling tests — same deployment and across different
+  deployments — proving no over-allocation and no duplicate placements
+  under 20-goroutine concurrency (integration, against PostgreSQL — see
+  [`docs/scheduling.md`](../docs/scheduling.md))
 - [`internal/database`](../internal/database/migrate_test.go) — migrations,
-  for both the `nodes` and `deployments` tables
+  for the `nodes`, `deployments`, and `deployment_placements` tables
 - [`internal/controlplane`](../internal/controlplane) — HTTP handlers for
-  `/health`, `/ready`, every `/nodes*` route, and every `/deployments*` route
+  `/health`, `/ready`, every `/nodes*` route, every `/deployments*` route,
+  and every `/deployments/{id}/schedule` and `/deployments/{id}/placements`
+  route
 - [`internal/nodeagent`](../internal/nodeagent) — local identity, machine
   discovery, the Control Plane HTTP client, retry backoff, and the agent's
   orchestration loop

@@ -9,8 +9,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/schedulerapi"
 )
 
 func TestControlPlaneClientListNodesSuccess(t *testing.T) {
@@ -181,5 +184,161 @@ func TestControlPlaneClientListDeploymentsSuccess(t *testing.T) {
 	}
 	if len(resp.Deployments) != 1 || resp.Deployments[0].Name != "web" {
 		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestControlPlaneClientScheduleDeploymentSuccess(t *testing.T) {
+	id := uuid.New().String()
+	nodeID := uuid.New().String()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/deployments/" + id + "/schedule"
+		if r.Method != http.MethodPost || r.URL.Path != wantPath {
+			t.Errorf("unexpected request: %s %s, want POST %s", r.Method, r.URL.Path, wantPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(schedulerapi.ScheduleResponse{
+			DeploymentID: id,
+			Placements:   []schedulerapi.PlacementDTO{{ReplicaIndex: 0, NodeID: nodeID, CPU: 1, MemoryBytes: 1024}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	resp, err := client.ScheduleDeployment(context.Background(), id)
+	if err != nil {
+		t.Fatalf("ScheduleDeployment: %v", err)
+	}
+	if resp.DeploymentID != id || len(resp.Placements) != 1 || resp.Placements[0].NodeID != nodeID {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestControlPlaneClientScheduleDeploymentInsufficientCapacity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "insufficient cluster capacity to schedule every replica"})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	_, err := client.ScheduleDeployment(context.Background(), uuid.New().String())
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusConflict {
+		t.Errorf("error = %v, want a *StatusError with status 409", err)
+	}
+}
+
+func TestControlPlaneClientScheduleDeploymentNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "deployment not found"})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	_, err := client.ScheduleDeployment(context.Background(), uuid.New().String())
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		t.Errorf("error = %v, want a *StatusError with status 404", err)
+	}
+}
+
+func TestControlPlaneClientGetPlacementsSuccess(t *testing.T) {
+	id := uuid.New().String()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/deployments/" + id + "/placements"
+		if r.Method != http.MethodGet || r.URL.Path != wantPath {
+			t.Errorf("unexpected request: %s %s, want GET %s", r.Method, r.URL.Path, wantPath)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(schedulerapi.PlacementsResponse{DeploymentID: id})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	resp, err := client.GetPlacements(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetPlacements: %v", err)
+	}
+	if resp.DeploymentID != id || len(resp.Placements) != 0 {
+		t.Errorf("unexpected response: %+v", resp)
+	}
+}
+
+func TestControlPlaneClientGetPlacementsMalformedResponseBodyDoesNotPanic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"placements": [{"replicaIndex": `))
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("GetPlacements panicked on malformed response: %v", r)
+		}
+	}()
+	if _, err := client.GetPlacements(context.Background(), uuid.New().String()); err == nil {
+		t.Error("GetPlacements succeeded on malformed body, want an error")
+	}
+}
+
+func TestResolveDeploymentIDPassesThroughAnAlreadyValidUUID(t *testing.T) {
+	id := uuid.New().String()
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(deploymentapi.ListDeploymentsResponse{})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	got, err := ResolveDeploymentID(context.Background(), client, id)
+	if err != nil {
+		t.Fatalf("ResolveDeploymentID: %v", err)
+	}
+	if got != id {
+		t.Errorf("ResolveDeploymentID(%q) = %q, want it unchanged", id, got)
+	}
+	if calls != 0 {
+		t.Errorf("ResolveDeploymentID made %d HTTP calls for an already-valid UUID, want 0", calls)
+	}
+}
+
+func TestResolveDeploymentIDLooksUpByName(t *testing.T) {
+	wantID := uuid.New().String()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(deploymentapi.ListDeploymentsResponse{
+			Deployments: []deploymentapi.DeploymentDTO{{ID: uuid.New().String(), Name: "api"}, {ID: wantID, Name: "web"}},
+		})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	got, err := ResolveDeploymentID(context.Background(), client, "web")
+	if err != nil {
+		t.Fatalf("ResolveDeploymentID: %v", err)
+	}
+	if got != wantID {
+		t.Errorf("ResolveDeploymentID(%q) = %q, want %q", "web", got, wantID)
+	}
+}
+
+func TestResolveDeploymentIDUnknownNameReturns404(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(deploymentapi.ListDeploymentsResponse{})
+	}))
+	defer server.Close()
+
+	client := NewControlPlaneClient(server.URL)
+	_, err := ResolveDeploymentID(context.Background(), client, "does-not-exist")
+	var statusErr *StatusError
+	if !errors.As(err, &statusErr) || statusErr.StatusCode != http.StatusNotFound {
+		t.Errorf("error = %v, want a *StatusError with status 404", err)
 	}
 }

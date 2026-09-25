@@ -114,6 +114,143 @@ func TestMigrateEnforcesDeploymentsConstraints(t *testing.T) {
 	}
 }
 
+func TestMigrateCreatesTheDeploymentPlacementsTable(t *testing.T) {
+	db := dbtest.Open(t)
+	ctx := context.Background()
+
+	_, err := db.ExecContext(ctx, `
+		SELECT id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at
+		FROM deployment_placements
+		WHERE false
+	`)
+	if err != nil {
+		t.Fatalf("querying deployment_placements table columns: %v", err)
+	}
+}
+
+func TestMigrateEnforcesDeploymentPlacementsConstraints(t *testing.T) {
+	seed := func(t *testing.T, db *sql.DB) (deploymentID, nodeID string) {
+		t.Helper()
+		deploymentID, nodeID = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+		if _, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployments (id, name, image, replicas, cpu, memory_bytes, created_at, updated_at)
+			VALUES ($1, 'placement-seed', 'nginx', 1, 1, 1, now(), now())`, deploymentID); err != nil {
+			t.Fatalf("seeding deployment: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(), `
+			INSERT INTO nodes (id, hostname, status, os, architecture, cpu_capacity, memory_capacity_bytes, agent_version, registered_at, updated_at)
+			VALUES ($1, 'placement-seed-node', 'Ready', 'linux', 'amd64', 4, 4096, '0.1.0', now(), now())`, nodeID); err != nil {
+			t.Fatalf("seeding node: %v", err)
+		}
+		return deploymentID, nodeID
+	}
+
+	t.Run("negative replica index rejected", func(t *testing.T) {
+		db := dbtest.Open(t)
+		deploymentID, nodeID := seed(t, db)
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, -1, $2, 1, 1, now(), now())`, deploymentID, nodeID)
+		if err == nil {
+			t.Fatal("insert with a negative replica_index succeeded, want the CHECK constraint to reject it")
+		}
+	})
+
+	t.Run("zero cpu rejected", func(t *testing.T) {
+		db := dbtest.Open(t)
+		deploymentID, nodeID := seed(t, db)
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, 0, $2, 0, 1, now(), now())`, deploymentID, nodeID)
+		if err == nil {
+			t.Fatal("insert with cpu = 0 succeeded, want the CHECK constraint to reject it")
+		}
+	})
+
+	t.Run("zero memory rejected", func(t *testing.T) {
+		db := dbtest.Open(t)
+		deploymentID, nodeID := seed(t, db)
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, 0, $2, 1, 0, now(), now())`, deploymentID, nodeID)
+		if err == nil {
+			t.Fatal("insert with memory_bytes = 0 succeeded, want the CHECK constraint to reject it")
+		}
+	})
+
+	t.Run("unknown deployment_id rejected by foreign key", func(t *testing.T) {
+		db := dbtest.Open(t)
+		_, nodeID := seed(t, db)
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), gen_random_uuid(), 0, $1, 1, 1, now(), now())`, nodeID)
+		if err == nil {
+			t.Fatal("insert with an unknown deployment_id succeeded, want the foreign key to reject it")
+		}
+	})
+
+	t.Run("unknown node_id rejected by foreign key", func(t *testing.T) {
+		db := dbtest.Open(t)
+		deploymentID, _ := seed(t, db)
+		_, err := db.ExecContext(context.Background(), `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, 0, gen_random_uuid(), 1, 1, now(), now())`, deploymentID)
+		if err == nil {
+			t.Fatal("insert with an unknown node_id succeeded, want the foreign key to reject it")
+		}
+	})
+
+	t.Run("duplicate deployment_id/replica_index rejected", func(t *testing.T) {
+		db := dbtest.Open(t)
+		deploymentID, nodeID := seed(t, db)
+		const insert = `
+			INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+			VALUES (gen_random_uuid(), $1, 0, $2, 1, 1, now(), now())`
+		if _, err := db.ExecContext(context.Background(), insert, deploymentID, nodeID); err != nil {
+			t.Fatalf("first insert: %v", err)
+		}
+		if _, err := db.ExecContext(context.Background(), insert, deploymentID, nodeID); err == nil {
+			t.Fatal("second insert with the same (deployment_id, replica_index) succeeded, want the UNIQUE constraint to reject it")
+		}
+	})
+}
+
+func TestMigrateDeploymentPlacementsCascadeDeletesWithDeployment(t *testing.T) {
+	db := dbtest.Open(t)
+	ctx := context.Background()
+
+	const deploymentID = "33333333-3333-3333-3333-333333333333"
+	const nodeID = "44444444-4444-4444-4444-444444444444"
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO deployments (id, name, image, replicas, cpu, memory_bytes, created_at, updated_at)
+		VALUES ($1, 'cascade-seed', 'nginx', 1, 1, 1, now(), now())`, deploymentID); err != nil {
+		t.Fatalf("seeding deployment: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO nodes (id, hostname, status, os, architecture, cpu_capacity, memory_capacity_bytes, agent_version, registered_at, updated_at)
+		VALUES ($1, 'cascade-seed-node', 'Ready', 'linux', 'amd64', 4, 4096, '0.1.0', now(), now())`, nodeID); err != nil {
+		t.Fatalf("seeding node: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO deployment_placements (id, deployment_id, replica_index, node_id, cpu, memory_bytes, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, 0, $2, 1, 1, now(), now())`, deploymentID, nodeID); err != nil {
+		t.Fatalf("seeding placement: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, `DELETE FROM deployments WHERE id = $1`, deploymentID); err != nil {
+		t.Fatalf("deleting deployment: %v", err)
+	}
+
+	var count int
+	if err := db.QueryRowContext(ctx, `SELECT count(*) FROM deployment_placements WHERE deployment_id = $1`, deploymentID).Scan(&count); err != nil {
+		t.Fatalf("counting placements after cascade delete: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("deployment_placements has %d rows for a deleted deployment, want 0 (ON DELETE CASCADE)", count)
+	}
+}
+
 func TestMigrateEnforcesDeploymentsNameUniqueness(t *testing.T) {
 	db := dbtest.Open(t)
 	ctx := context.Background()

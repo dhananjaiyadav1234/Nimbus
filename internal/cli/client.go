@@ -15,8 +15,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/dhananjaiyadav1234/Nimbus/internal/clusterapi"
 	"github.com/dhananjaiyadav1234/Nimbus/internal/deploymentapi"
+	"github.com/dhananjaiyadav1234/Nimbus/internal/schedulerapi"
 )
 
 // requestTimeout bounds a single call to the Control Plane.
@@ -71,6 +74,50 @@ func (c *ControlPlaneClient) ListDeployments(ctx context.Context) (deploymentapi
 	var out deploymentapi.ListDeploymentsResponse
 	err := c.do(ctx, http.MethodGet, "/deployments", nil, &out)
 	return out, err
+}
+
+// ScheduleDeployment calls POST /deployments/{id}/schedule.
+func (c *ControlPlaneClient) ScheduleDeployment(ctx context.Context, deploymentID string) (schedulerapi.ScheduleResponse, error) {
+	var out schedulerapi.ScheduleResponse
+	err := c.do(ctx, http.MethodPost, "/deployments/"+deploymentID+"/schedule", nil, &out)
+	return out, err
+}
+
+// GetPlacements calls GET /deployments/{id}/placements.
+func (c *ControlPlaneClient) GetPlacements(ctx context.Context, deploymentID string) (schedulerapi.PlacementsResponse, error) {
+	var out schedulerapi.PlacementsResponse
+	err := c.do(ctx, http.MethodGet, "/deployments/"+deploymentID+"/placements", nil, &out)
+	return out, err
+}
+
+// ResolveDeploymentID resolves nameOrID to a deployment ID for commands
+// that, unlike the Control Plane's own ID-based routes, accept a
+// deployment by name (e.g. `nimbus deployment schedule web`). If nameOrID
+// already parses as a UUID it is returned unchanged — an automation script
+// that already has the ID pays no extra round trip. Otherwise it is looked
+// up by name via ListDeployments, the CLI's only source of deployment
+// data, and a *StatusError with a 404 status is returned if no deployment
+// has that name — the same status the Control Plane itself would report
+// for an unknown ID, so callers (see cmd/nimbus) handle both the same way.
+//
+// This is a CLI-side convenience only: it performs one extra HTTP list
+// call, nothing else. It contains no scheduling logic and never touches
+// PostgreSQL or Docker.
+func ResolveDeploymentID(ctx context.Context, client *ControlPlaneClient, nameOrID string) (string, error) {
+	if _, err := uuid.Parse(nameOrID); err == nil {
+		return nameOrID, nil
+	}
+
+	resp, err := client.ListDeployments(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range resp.Deployments {
+		if d.Name == nameOrID {
+			return d.ID, nil
+		}
+	}
+	return "", &StatusError{StatusCode: http.StatusNotFound, Message: fmt.Sprintf("no deployment named %q", nameOrID)}
 }
 
 // do sends method/path to the Control Plane, JSON-encoding body if

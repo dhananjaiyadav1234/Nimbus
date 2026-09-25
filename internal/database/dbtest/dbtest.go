@@ -202,7 +202,14 @@ func quoteIdentifier(name string) string {
 // empty database, without paying the cost of recreating the schema.
 func truncateAll(t *testing.T, db *sql.DB) {
 	t.Helper()
-	if _, err := db.Exec(`TRUNCATE TABLE nodes, deployments`); err != nil {
+	// deployment_placements is listed alongside its two foreign-key
+	// parents (deployments, nodes) in the same TRUNCATE statement — see
+	// PostgreSQL's own requirement that a single TRUNCATE either name
+	// every table with a foreign key into the ones being truncated, or use
+	// CASCADE; naming it explicitly here (rather than relying on CASCADE)
+	// keeps this list an accurate, visible record of every table Nimbus
+	// tests share.
+	if _, err := db.Exec(`TRUNCATE TABLE nodes, deployments, deployment_placements`); err != nil {
 		t.Fatalf("dbtest: truncating tables: %v", err)
 	}
 }
